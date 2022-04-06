@@ -35,9 +35,10 @@ type TCPServerTunnelConfig struct {
 }
 
 type Socks5Config struct {
-	BindAddress string
-	Username    string
-	Password    string
+	BindAddress        string
+	Username           string
+	Password           string
+	WhitelistedDomains []string
 }
 
 type Configuration struct {
@@ -285,6 +286,13 @@ func parseSocks5Config(section *ini.Section) (RoutineSpawner, error) {
 		return nil, err
 	}
 	config.BindAddress = bindAddress
+
+	whitelistedDomainsStr, _ := parseString(section, "WhitelistedDomains")
+	whitelistedDomains := strings.Split(whitelistedDomainsStr, ",")
+	for i, domain := range whitelistedDomains {
+		whitelistedDomains[i] = strings.TrimSpace(domain)
+	}
+	config.WhitelistedDomains = whitelistedDomains
 
 	username, _ := parseString(section, "Username")
 	config.Username = username

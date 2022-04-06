@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/armon/go-socks5"
 
@@ -19,6 +20,8 @@ import (
 
 // errorLogger is the logger to print error message
 var errorLogger = log.New(os.Stderr, "ERROR: ", log.LstdFlags)
+
+var debugLogger = log.New(os.Stderr, "DEBUG: ", log.LstdFlags|log.Lmicroseconds)
 
 // CredentialValidator stores the authentication data of a socks5 proxy
 type CredentialValidator struct {
@@ -119,9 +122,62 @@ func (d VirtualTun) resolveToAddrPort(endpoint *addressPort) (*netip.AddrPort, e
 	return &addrPort, nil
 }
 
+type routingTokenT int
+
+var routingToken routingTokenT
+
+const useWG = "useWG"
+
+type dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func routingDial(fn dial) dial {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		shouldUseWg := ctx.Value(routingToken) == useWG
+		debugLogger.Printf("Dialing: %s (%t)", addr, shouldUseWg)
+		if shouldUseWg {
+			return fn(ctx, network, addr)
+		}
+
+		return net.Dial(network, addr)
+	}
+}
+
+type routingResolver struct {
+	resolver socks5.NameResolver
+	domains  []string
+}
+
+func (l routingResolver) shouldUseWG(name string) bool {
+	for _, domain := range l.domains {
+		if strings.HasSuffix(name, domain) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (l routingResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	shouldUseWG := l.shouldUseWG(name)
+	debugLogger.Printf("Resolving: %s (%t)", name, shouldUseWG)
+	if shouldUseWG {
+		c, i, err := l.resolver.Resolve(ctx, name)
+		c = context.WithValue(c, routingToken, useWG)
+		return c, i, err
+	}
+
+	return socks5.DNSResolver{}.Resolve(ctx, name)
+}
+
 // Spawns a socks5 server.
 func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
-	conf := &socks5.Config{Dial: vt.tnet.DialContext, Resolver: vt}
+	conf := &socks5.Config{
+		Dial: routingDial(vt.tnet.DialContext),
+		Resolver: routingResolver{
+			resolver: vt,
+			domains:  config.WhitelistedDomains,
+		},
+	}
 	if username := config.Username; username != "" {
 		validator := CredentialValidator{username: username}
 		validator.password = config.Password
